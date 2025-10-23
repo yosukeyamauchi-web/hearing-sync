@@ -161,23 +161,23 @@ function include(filename) {
 * @throws {Error} API からのデータ取得に失敗した場合
 */
 function getStoresList() {
-try {
-// AppSheet API を呼び出して Stores テーブルの全レコードを取得
-// 'Filter(Stores, TRUE)' は全件取得を意味する AppSheet の式
-const response = AppSheetApiService.findRecords('Stores', 'Filter(Stores, TRUE)');
+    try {
+        const response = AppSheetApiService.findRecords('Stores', 'Filter(Stores, TRUE)');
 
- // フロントエンドが必要とする形式（storeName と companyName のみ）にデータを整形
-const storesList = response.map(record => ({
-storeName: record.StoreName,
-companyName: record.CompanyName
-}));
+        // フロントエンドのフィルター が必要とする全カラムを
+        // camelCase にマッピングして返す
+        const storesList = response.map(record => ({
+            storeName: record.StoreName,
+            companyName: record.CompanyName,
+            teamName: record.TeamName,       // TeamName を teamName にマッピング
+            interviewer: record.Interviewer  // Interviewer を interviewer にマッピング
+        }));
 
- return storesList;
-} catch (error) {
-Logger.log(`getStoresListでエラーが発生しました: ${error.toString()}`);
-// エラーをフロントエンドに伝播させるために再スローする
-throw new Error(`店舗リストの取得に失敗しました。詳細: ${error.message}`);
-}
+        return storesList;
+    } catch (error) {
+        Logger.log(`getStoresListでエラーが発生しました: ${error.toString()}`);
+        throw new Error(`店舗リストの取得に失敗しました。詳細: ${error.message}`);
+    }
 }
 
 /**
@@ -309,4 +309,14 @@ Logger.log(`saveStoreDataでエラーが発生しました: ${error.toString()}`
 // フロントエンドにはユーザーフレンドリーなメッセージを返す
 return { success: false, error: `データの保存に失敗しました。管理者にお問い合わせください。詳細: ${error.message}` };
 }
+}
+
+
+/**
+* スプレッドシートを開いた時にメニューを追加する (必要に応じて項目を修正)
+*/
+function onOpen() {
+ // AppSheet への移行に伴い、メニュー項目は不要になる可能性があります。
+ // 必要に応じて、新しい機能へのメニュー項目を追加してください。
+ // SpreadsheetApp.getUi().createMenu('便利ツール').addToUi();
 }
