@@ -1,0 +1,631 @@
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // 全てのHTML要素をここで取得！
+    const statusArea = document.getElementById('status-area');
+    const statusMessage = document.getElementById('status-message');
+    const spinner = document.getElementById('spinner');
+    const teamSelect = document.getElementById('team-select');
+    const interviewerSelect = document.getElementById('interviewer-select');
+    const companySelect = document.getElementById('company-select');
+    const storeSelect = document.getElementById('store-select');
+    const clientListTableBody = document.getElementById('client-list-table');
+    const inputFormArea = document.getElementById('input-form-area');
+    const selectedClientNameEl = document.getElementById('selected-client-name');
+
+    // タブ関連
+    const tabs = {
+        cost: { btn: document.getElementById('tab-cost'), panel: document.getElementById('panel-cost') },
+        cost2: { btn: document.getElementById('tab-cost2'), panel: document.getElementById('panel-cost2') },
+        org: { btn: document.getElementById('tab-org'), panel: document.getElementById('panel-org') },
+    };
+
+    // --- 外注費タブの要素 ---
+    const costTableBody = document.getElementById('cost-table-body');
+    const annualCostTotalEl = document.getElementById('annual-cost-total');
+    const bulkInputBody = document.getElementById('bulk-input-body');
+    const applyAllMonthsBtn = document.getElementById('apply-all-months-btn');
+    const confirmZeroBtn = document.getElementById('confirm-zero-btn');
+    const saveCostBtn = document.getElementById('save-cost-btn');
+
+    // --- 採用・労務費タブの要素 ---
+    const recruitmentCostBody = document.getElementById('recruitment-cost-body');
+    const addRecruitmentRowBtn = document.getElementById('add-recruitment-row');
+    const overtimeCostBody = document.getElementById('overtime-cost-body');
+    const addOvertimeRowBtn = document.getElementById('add-overtime-row');
+    const totalOvertimeCostAnnuallyEl = document.getElementById('total-overtime-cost-annually');
+    const recruitmentBudgetEl = document.getElementById('recruitment-budget');
+    const recruitmentActualsEl = document.getElementById('recruitment-actuals');
+    const budgetAttainmentRateEl = document.getElementById('budget-attainment-rate');
+    const budgetProgressBarEl = document.getElementById('budget-progress-bar');
+    const remainingBudgetEl = document.getElementById('remaining-budget');
+    const saveCost2Btn = document.getElementById('save-cost2-btn');
+
+    // --- 組織図タブの要素 ---
+    const saveOrgBtn = document.getElementById('save-org-btn');
+    const currentOrgInfoEl = document.getElementById('current-org-info');
+    const orgDriveUrlInput = document.getElementById('org-drive-url-input');
+
+    // --- 状態を保持する変数 ---
+    let allStores = [];
+    let currentClient = null;
+    let companyChoice, storeChoice, teamChoice, interviewerChoice;
+    let isProgrammaticChange = false; // ★★★ フィルターの無限ループを防ぐための魔法のフラグ ★★★
+
+    // --- 初期化 ---
+    function initializeApp() {
+        initializeChoices();
+        addEventListeners();
+        generateBulkInputRow();
+        generateCostTable();
+        showStatus('クライアントリスト、取ってくるで！', 'info', true);
+        // 修正: 新API対応 - getInitialData() を getStoresList() に変更
+        google.script.run.withSuccessHandler(onInitialDataSuccess).withFailureHandler(onFailure).getStoresList();
+    }
+
+    function initializeChoices() {
+        const config = { searchEnabled: true, itemSelectText: '選択', noResultsText: '見つからへんな…', noChoicesText: '選べるもんがないわ', placeholder: true, removeItemButton: false };
+        teamChoice = new Choices(teamSelect, { ...config, placeholderValue: 'チーム名で探す...' });
+        interviewerChoice = new Choices(interviewerSelect, { ...config, placeholderValue: '担当者名で探す...' });
+        companyChoice = new Choices(companySelect, { ...config, placeholderValue: '会社名で探す...' });
+        storeChoice = new Choices(storeSelect, { ...config, placeholderValue: '店舗名で探す...' });
+    }
+
+    // --- イベントリスナーをここに集約！ ---
+    function addEventListeners() {
+        // どのフィルターをいじっても、この司令塔が発動するんや！
+        teamSelect.addEventListener('change', filterAndPopulate);
+        interviewerSelect.addEventListener('change', filterAndPopulate);
+        companySelect.addEventListener('change', filterAndPopulate);
+
+        storeSelect.addEventListener('change', () => {
+            if (isProgrammaticChange) return;
+            const selectedStoreName = storeChoice.getValue(true);
+            // 修正: handleClientSelect に渡す前に storeName のみを抽出
+            const client = allStores.find(s => s.storeName === selectedStoreName);
+            if (client) {
+                // 修正: handleClientSelect には storeName のみを渡すように変更（関数内でオブジェクトを再構築）
+                 handleClientSelect({ storeName: client.storeName });
+            } else {
+                inputFormArea.classList.add('hidden');
+                currentClient = null;
+            }
+        });
+
+        clientListTableBody.addEventListener('click', (e) => {
+            const row = e.target.closest('tr');
+            if(row && row.dataset.storeName) {
+                // 修正: handleClientSelect には storeName のみを渡すように変更
+                handleClientSelect({ storeName: row.dataset.storeName });
+            }
+        });
+
+        Object.keys(tabs).forEach(key => tabs[key].btn.addEventListener('click', () => switchTab(key)));
+        applyAllMonthsBtn.addEventListener('click', applyBulkInputToAllMonths);
+        addRecruitmentRowBtn.addEventListener('click', () => addRecruitmentRow());
+        addOvertimeRowBtn.addEventListener('click', () => addOvertimeRow());
+        recruitmentBudgetEl.addEventListener('input', calculateAllCost2);
+        recruitmentActualsEl.addEventListener('input', calculateAllCost2);
+
+        document.body.addEventListener('input', handleDynamicInput);
+        document.body.addEventListener('click', handleDynamicClick);
+        document.body.addEventListener('change', handleDynamicChange);
+
+        saveCostBtn.addEventListener('click', saveCostDataHandler);
+        confirmZeroBtn.addEventListener('click', confirmZeroAndSaveHandler);
+        saveCost2Btn.addEventListener('click', saveCost2DataHandler);
+        saveOrgBtn.addEventListener('click', saveOrgDataHandler);
+    }
+
+    // --- データハンドラ ---
+    function onInitialDataSuccess(data) {
+        // 修正: 新APIはstores配列そのものを返すため、data.successチェックは不要
+        // if (!data.success) return onFailure(data); // この行は削除またはコメントアウト
+        allStores = data; // 修正: dataオブジェクト全体ではなく、配列を直接allStoresに代入
+        // 修正: マスタデータはallStoresから動的に生成する
+        const availableCompanies = [...new Set(allStores.map(s => s.companyName))];
+        const availableTeams = [...new Set(allStores.map(s => s.teamName).filter(Boolean))];
+        const availableInterviewers = [...new Set(allStores.map(s => s.interviewer).filter(Boolean))];
+
+        updateChoices(companyChoice, availableCompanies, 'すべての会社', true);
+        updateChoices(teamChoice, availableTeams, 'すべてのチーム', true);
+        updateChoices(interviewerChoice, availableInterviewers, 'すべての担当者', true);
+
+        filterAndPopulate();
+        showStatus('準備OKやで！', 'success');
+    }
+
+    function onStoreDetailsSuccess(data) {
+        // 修正: 新APIはsuccessプロパティを持たないため、チェックは不要
+        // if (!data.success) return onFailure(onFailure); // この行は削除またはコメントアウト
+        showStatus('データ、持ってきたで！', 'success');
+        // 修正: populate関数に渡す引数を新しい正規化構造に合わせる
+        populateCostForm(data.outsourcingCosts);
+        populateCost2Form(data); // cost2Formはオブジェクト全体を受け取る
+        populateOrgForm(data.organizationCharts);
+    }
+
+    function onFailure(error) {
+        showStatus(`エラーや！: ${error.message || 'なんかよう分からんエラーが出たわ…'}`, 'error');
+        console.error('GAS Error:', error);
+        [saveCostBtn, confirmZeroBtn, saveCost2Btn, saveOrgBtn].forEach(btn => btn.disabled = false);
+    }
+
+    // --- メインロジック ---
+
+    /**
+     * ★★★超賢い絞り込み機能の司令塔★★★
+     * フィルターのどれかが変更された時に、他のフィルターの選択肢とクライアント一覧を連動して更新するで！
+     */
+    function filterAndPopulate() {
+        if (isProgrammaticChange) return; // プログラムによる変更時は何もしない（無限ループ防止）
+
+        // 1. 今どのフィルターが選ばれとるか、全部チェックや！
+        const selectedTeam = teamChoice.getValue(true);
+        const selectedInterviewer = interviewerChoice.getValue(true);
+        const selectedCompany = companyChoice.getValue(true);
+
+        // 2. どの選択肢が「選択可能」か、動的に計算するで！
+        // 例えば、チームを選んだら、そのチームに属する担当者と会社だけが選択肢に出るようになるんや。
+        let tempStoresForCompany = allStores;
+        if (selectedTeam) tempStoresForCompany = tempStoresForCompany.filter(s => s.teamName === selectedTeam);
+        if (selectedInterviewer) tempStoresForCompany = tempStoresForCompany.filter(s => s.interviewer === selectedInterviewer);
+        const availableCompanies = [...new Set(tempStoresForCompany.map(s => s.companyName))];
+
+        let tempStoresForTeam = allStores;
+        if (selectedCompany) tempStoresForTeam = tempStoresForTeam.filter(s => s.companyName === selectedCompany);
+         // 修正: tempStoresForInterviewer は存在しないため、tempStoresForTeam をフィルタリング
+        if (selectedInterviewer) tempStoresForTeam = tempStoresForTeam.filter(s => s.interviewer === selectedInterviewer);
+        const availableTeams = [...new Set(tempStoresForTeam.map(s => s.teamName).filter(Boolean))];
+
+        let tempStoresForInterviewer = allStores;
+        if (selectedCompany) tempStoresForInterviewer = tempStoresForInterviewer.filter(s => s.companyName === selectedCompany);
+        if (selectedTeam) tempStoresForInterviewer = tempStoresForInterviewer.filter(s => s.teamName === selectedTeam);
+        const availableInterviewers = [...new Set(tempStoresForInterviewer.map(s => s.interviewer).filter(Boolean))];
+
+        // 3. 最終的に表示する店舗リストを、選択された全フィルターで絞り込む
+        let finalFilteredStores = allStores;
+        if (selectedTeam) finalFilteredStores = finalFilteredStores.filter(s => s.teamName === selectedTeam);
+        if (selectedInterviewer) finalFilteredStores = finalFilteredStores.filter(s => s.interviewer === selectedInterviewer);
+        if (selectedCompany) finalFilteredStores = finalFilteredStores.filter(s => s.companyName === selectedCompany);
+
+        // 4. 各ドロップダウンの中身を、新しい選択肢で爆速リフレッシュ！
+        isProgrammaticChange = true;
+        updateChoices(companyChoice, availableCompanies, 'すべての会社', selectedCompany);
+        updateChoices(teamChoice, availableTeams, 'すべてのチーム', selectedTeam);
+        updateChoices(interviewerChoice, availableInterviewers, 'すべての担当者', selectedInterviewer);
+        updateChoices(storeChoice, finalFilteredStores.map(s => s.storeName), '店舗を選択'); // 店舗は常にリセット
+        isProgrammaticChange = false;
+
+        // 5. 最後に、絞り込まれたクライアント一覧を描画するんや！
+        renderClientList(finalFilteredStores);
+    }
+
+    /**
+     * クライアントが選択されたときの処理
+     * @param {object} client - 選択されたクライアントオブジェクト (storeNameプロパティのみを持つことを期待)
+     */
+    function handleClientSelect(client) {
+        // currentClient には、allStores から見つけた完全なクライアント情報をセットする
+        currentClient = allStores.find(s => s.storeName === client.storeName);
+        if (!currentClient) {
+             console.error("Selected client not found in allStores:", client.storeName);
+             return; // 見つからない場合は処理を中断
+        }
+
+
+        isProgrammaticChange = true;
+        teamChoice.setChoiceByValue(currentClient.teamName || '');
+        interviewerChoice.setChoiceByValue(currentClient.interviewer || '');
+        companyChoice.setChoiceByValue(currentClient.companyName || '');
+        storeChoice.setChoiceByValue(currentClient.storeName || '');
+        isProgrammaticChange = false;
+
+        filterAndPopulate(); // テーブルの表示を絞り込み後のものに更新
+
+        selectedClientNameEl.textContent = `${currentClient.storeName}`;
+        inputFormArea.classList.remove('hidden');
+
+        document.querySelectorAll('#client-list-table tr').forEach(tr => {
+            tr.classList.toggle('bg-amber-50', tr.dataset.storeName === currentClient.storeName);
+        });
+        [saveCostBtn, confirmZeroBtn, saveCost2Btn, saveOrgBtn].forEach(btn => btn.disabled = false);
+        showStatus(`「${currentClient.storeName}」のデータ、取ってくるわな！`, 'info', true);
+        // 修正: 新API対応 - getStoreDetails(client) を getStoreDataByStoreName(client.storeName) に変更
+        google.script.run.withSuccessHandler(onStoreDetailsSuccess).withFailureHandler(onFailure).getStoreDataByStoreName(currentClient.storeName);
+    }
+
+    // --- UI更新 ---
+    function showStatus(message, type = 'info', isLoading = false) {
+        statusArea.classList.remove('bg-green-100', 'text-green-800', 'bg-red-100', 'text-red-800', 'bg-yellow-100', 'text-yellow-700', 'hidden');
+        statusMessage.textContent = message;
+        if (type === 'success') statusArea.classList.add('bg-green-100', 'text-green-800');
+        else if (type === 'error') statusArea.classList.add('bg-red-100', 'text-red-800');
+        else statusArea.classList.add('bg-yellow-100', 'text-yellow-700');
+        spinner.classList.toggle('hidden', !isLoading);
+        if (!isLoading) {
+            setTimeout(() => statusArea.classList.add('hidden'), 4000);
+        }
+    }
+
+    function updateChoices(choiceInstance, items, placeholderLabel, currentValue = null) {
+        const choices = [
+            { value: '', label: placeholderLabel, selected: !currentValue, disabled: false, placeholder: true },
+            ...[...new Set(items)].sort().map(item => ({
+                value: item,
+                label: item,
+                selected: item === currentValue
+            }))
+        ];
+        // 既存の選択肢を新しいものに置き換えるで！
+        choiceInstance.setChoices(choices, 'value', 'label', true);
+    }
+
+    function renderClientList(clients) {
+        clientListTableBody.innerHTML = '';
+        clients.forEach(client => {
+            const row = document.createElement('tr');
+            row.className = 'bg-white border-b hover:bg-gray-50 cursor-pointer';
+            row.dataset.storeName = client.storeName;
+             // 修正: タグ表示ロジックを新しいデータ構造に合わせる (data.outsourcingCosts, data.storeDetailsなど)
+             // ただし、allStoresには詳細データが含まれていないため、この表示は古いままになる可能性あり
+             // 初期表示ではタグを非表示にするか、getStoresListが返すデータにタグ用のフラグを含める必要あり
+             // 今は既存の表示ロジックを維持するが、設計見直しが必要
+            row.innerHTML = `
+                <td class="px-3 py-3 font-medium text-gray-900 whitespace-nowrap">${client.storeName}</td>
+                <td class="px-3 py-3 text-center"><span class="${client.costData ? 'data-tag data-tag-exists' : 'data-tag data-tag-missing'}">${client.costData ? 'あるで' : 'まだや'}</span></td>
+                <td class="px-3 py-3 text-center"><span class="${client.cost2Data ? 'data-tag data-tag-exists' : 'data-tag data-tag-missing'}">${client.cost2Data ? 'あるで' : 'まだや'}</span></td>
+                <td class="px-3 py-3 text-center"><span class="${client.orgData ? 'data-tag data-tag-exists' : 'data-tag data-tag-missing'}">${client.orgData ? 'あるで' : 'まだや'}</span></td>`;
+            clientListTableBody.appendChild(row);
+        });
+    }
+
+    function switchTab(targetKey) {
+        const activeClass = 'whitespace-nowrap py-3 px-1 border-b-2 font-bold text-sm border-indigo-500 text-indigo-600';
+        const inactiveClass = 'whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300';
+        Object.keys(tabs).forEach(key => {
+            const isTarget = key === targetKey;
+            tabs[key].panel.classList.toggle('hidden', !isTarget);
+            tabs[key].btn.className = isTarget ? activeClass : inactiveClass;
+        });
+    }
+
+    // --- ここから下は、各機能ごとのヘルパー関数群やで！ ---
+    // (省略されている部分は元のコードと同じやで！)
+        function handleDynamicInput(e) {
+            const target = e.target;
+            formatNumberInput(target);
+            const tbody = target.closest('tbody');
+            if (tbody) {
+                if (tbody.id === 'cost-table-body' || tbody.id === 'bulk-input-body') calculateCosts();
+                else if (tbody.id === 'recruitment-cost-body' || tbody.id === 'overtime-cost-body') calculateAllCost2();
+            }
+        }
+        function handleDynamicChange(e) {
+            const select = e.target;
+            if (select.matches('.recruitment-medium, .overtime-target')) {
+                const otherInput = select.closest('div').querySelector('.other-input');
+                if (otherInput) otherInput.classList.toggle('visible', select.value === 'other');
+            }
+             if (select.matches('.recruitment-medium')) {
+                const costInput = select.closest('tr').querySelector('.recruitment-cost');
+                if (costInput) {
+                    costInput.disabled = (select.value === 'ハローワーク' || select.value === 'Indeed (無料)');
+                    if (costInput.disabled) costInput.value = '0';
+                }
+                calculateAllCost2();
+            }
+        }
+        function handleDynamicClick(e) {
+            const removeBtn = e.target.closest('.remove-row-btn');
+            if (removeBtn) {
+                const tbody = removeBtn.closest('tbody');
+                removeBtn.closest('tr').remove();
+                if (tbody && (tbody.id === 'recruitment-cost-body' || tbody.id === 'overtime-cost-body')) calculateAllCost2();
+            }
+        }
+        function formatNumberInput(input) {
+            if (!input.matches('.cost-input, .number-input')) return;
+            let value = input.value.replace(/[^\d.]/g, '');
+            let parts = value.split('.');
+            parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+            input.value = parts.join('.');
+        }
+        function getDaysInMonth(month, year = new Date().getFullYear()) { return new Date(year, month, 0).getDate(); }
+        function generateBulkInputRow() {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="longPerson" placeholder="2" class="cost-input w-full p-2 border rounded text-right form-input"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="longPrice" placeholder="1500" class="cost-input w-full p-2 border rounded text-right form-input"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="longTime" placeholder="8" class="cost-input w-full p-2 border rounded text-right form-input"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="spotPerson" placeholder="5" class="cost-input w-full p-2 border rounded text-right form-input"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="spotPrice" placeholder="1600" class="cost-input w-full p-2 border rounded text-right form-input"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" data-type="spotTime" placeholder="4" class="cost-input w-full p-2 border rounded text-right form-input"></td>`;
+            bulkInputBody.appendChild(row);
+        }
+        function applyBulkInputToAllMonths() {
+            const bulkInputs = bulkInputBody.querySelectorAll('.cost-input');
+            const valuesToApply = {};
+            bulkInputs.forEach(input => { valuesToApply[input.dataset.type] = input.value; });
+            costTableBody.querySelectorAll('tr').forEach(row => {
+                Object.keys(valuesToApply).forEach(type => {
+                    const targetInput = row.querySelector(`[data-type="${type}"]`);
+                    if (targetInput) targetInput.value = valuesToApply[type];
+                });
+            });
+            calculateCosts();
+        }
+        function generateCostTable() {
+            costTableBody.innerHTML = Array.from({ length: 12 }, (_, i) => `
+                <tr data-month="${i + 1}">
+                    <td class="px-2 py-2 whitespace-nowrap font-semibold text-sm">${i + 1}月 (${getDaysInMonth(i + 1)}日)</td>
+                    <td><input type="text" inputmode="numeric" data-type="longPerson" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td><input type="text" inputmode="numeric" data-type="longPrice" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td><input type="text" inputmode="numeric" data-type="longTime" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td><input type="text" inputmode="numeric" data-type="spotPerson" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td><input type="text" inputmode="numeric" data-type="spotPrice" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td><input type="text" inputmode="numeric" data-type="spotTime" class="cost-input w-24 p-1 border rounded text-right form-input"></td>
+                    <td class="px-2 py-2 monthly-total font-semibold text-right text-sm">¥0</td>
+                </tr>`).join('');
+        }
+        function calculateCosts() {
+            let annualTotal = 0;
+            costTableBody.querySelectorAll('tr').forEach(row => {
+                const getVal = type => parseFloat(row.querySelector(`[data-type="${type}"]`).value.replace(/,/g, '')) || 0;
+                const dailyTotal = (getVal('longPerson')*getVal('longPrice')*getVal('longTime')) + (getVal('spotPerson')*getVal('spotPrice')*getVal('spotTime'));
+                const daysInMonth = getDaysInMonth(parseInt(row.dataset.month, 10));
+                const monthlyTotal = dailyTotal * daysInMonth;
+                row.querySelector('.monthly-total').textContent = `¥${Math.round(monthlyTotal).toLocaleString()}`;
+                annualTotal += monthlyTotal;
+            });
+            annualCostTotalEl.textContent = `¥${Math.round(annualTotal).toLocaleString()}`;
+        }
+        function populateCostForm(outsourcingCosts) { // 引数名を変更
+            costTableBody.querySelectorAll('.cost-input').forEach(input => input.value = '');
+            // 修正: outsourcingCosts が配列であることを確認
+            if(outsourcingCosts && Array.isArray(outsourcingCosts)) {
+                 outsourcingCosts.forEach(monthData => {
+                    const row = costTableBody.querySelector(`tr[data-month="${monthData.month}"]`);
+                    if (row) {
+                        const formatValue = v => v ? Number(v).toLocaleString() : '';
+                        // 修正: プロパティ名がバックエンドのスキーマと一致しているか再確認（markdownに従う）
+                        row.querySelector('[data-type="longPerson"]').value = formatValue(monthData.longPerson);
+                        row.querySelector('[data-type="longPrice"]').value = formatValue(monthData.longPrice);
+                        row.querySelector('[data-type="longTime"]').value = formatValue(monthData.longTime);
+                        row.querySelector('[data-type="spotPerson"]').value = formatValue(monthData.spotPerson);
+                        row.querySelector('[data-type="spotPrice"]').value = formatValue(monthData.spotPrice);
+                        row.querySelector('[data-type="spotTime"]').value = formatValue(monthData.spotTime);
+                    }
+                });
+            }
+            calculateCosts();
+        }
+        function addRecruitmentRow(data = { medium: '', mediumOther: '', cost: '', postings: '', hires: '' }) {
+            const row = document.createElement('tr');
+            const isOtherSelected = data.medium === 'other';
+            row.innerHTML = `
+                <td class="pr-2 py-1">
+                    <div class="flex items-center gap-2">
+                        <select class="w-full p-2 form-select recruitment-medium">
+                            <option value="">選択してください</option>
+                            <option value="ハローワーク" ${data.medium === 'ハローワーク' ? 'selected' : ''}>ハローワーク</option>
+                            <option value="Indeed (無料)" ${data.medium === 'Indeed (無料)' ? 'selected' : ''}>Indeed (無料)</option>
+                            <option value="Indeed (有料)" ${data.medium === 'Indeed (有料)' ? 'selected' : ''}>Indeed (有料)</option>
+                            <option value="タウンワーク" ${data.medium === 'タウンワーク' ? 'selected' : ''}>タウンワーク</option>
+                            <option value="other" ${isOtherSelected ? 'selected' : ''}>その他 (有料媒体)</option>
+                        </select>
+                        <input type="text" placeholder="媒体名" value="${data.mediumOther || ''}" class="form-input p-2 w-full other-input ${isOtherSelected ? 'visible' : ''}">
+                    </div>
+                </td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" placeholder="0" value="${data.cost ? Number(data.cost).toLocaleString() : ''}" class="w-32 p-2 form-input number-input text-right recruitment-cost"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" placeholder="0" value="${data.postings ? Number(data.postings).toLocaleString() : ''}" class="w-24 p-2 form-input number-input text-right recruitment-postings"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" placeholder="0" value="${data.hires ? Number(data.hires).toLocaleString() : ''}" class="w-24 p-2 form-input number-input text-right recruitment-hires"></td>
+                <td class="pr-2 py-1"><span class="recruitment-annual-cost block text-right font-semibold p-2">¥0</span></td>
+                <td class="pr-2 py-1"><span class="recruitment-cpa block text-right font-semibold p-2">¥0</span></td>
+                <td class="text-center"><button class="btn-remove remove-row-btn p-1"><span class="material-symbols-outlined">delete</span></button></td>`;
+            recruitmentCostBody.appendChild(row);
+            const costInput = row.querySelector('.recruitment-cost');
+            if(costInput) costInput.disabled = (data.medium === 'ハローワーク' || data.medium === 'Indeed (無料)');
+        }
+        function addOvertimeRow(data = { target: '', targetOther: '', hourly: '', hours: '' }) {
+            const row = document.createElement('tr');
+            const isOtherSelected = data.target === 'other';
+            row.innerHTML = `
+                <td class="pr-2 py-1">
+                     <div class="flex items-center gap-2">
+                         <select class="w-full p-2 form-select overtime-target">
+                             <option value="">選択してください</option>
+                             <option value="センター長" ${data.target === 'センター長' ? 'selected' : ''}>センター長</option>
+                             <option value="現場責任者" ${data.target === '現場責任者' ? 'selected' : ''}>現場責任者</option>
+                             <option value="リーダー" ${data.target === 'リーダー' ? 'selected' : ''}>リーダー</option>
+                             <option value="フォークリフト担当" ${data.target === 'フォークリフト担当' ? 'selected' : ''}>フォークリフト担当</option>
+                             <option value="other" ${isOtherSelected ? 'selected' : ''}>その他 (自由入力)</option>
+                         </select>
+                         <input type="text" placeholder="名前など" value="${data.targetOther || ''}" class="form-input p-2 w-full other-input ${isOtherSelected ? 'visible' : ''}">
+                    </div>
+                </td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" placeholder="0" value="${data.hourly ? Number(data.hourly).toLocaleString() : ''}" class="w-32 p-2 form-input number-input text-right overtime-hourly"></td>
+                <td class="pr-2 py-1"><input type="text" inputmode="numeric" placeholder="0" value="${data.hours ? Number(data.hours).toLocaleString() : ''}" class="w-32 p-2 form-input number-input text-right overtime-hours"></td>
+                <td class="pr-2 py-1"><span class="overtime-total block text-right font-semibold p-2">¥0</span></td>
+                <td class="text-center"><button class="btn-remove remove-row-btn p-1"><span class="material-symbols-outlined">delete</span></button></td>`;
+            overtimeCostBody.appendChild(row);
+        }
+        function calculateAllCost2() {
+            let totalAnnualRecruitmentCost = 0;
+            recruitmentCostBody.querySelectorAll('tr').forEach(row => {
+                const cost = parseFloat(row.querySelector('.recruitment-cost').value.replace(/,/g, '')) || 0;
+                const postings = parseFloat(row.querySelector('.recruitment-postings').value.replace(/,/g, '')) || 0;
+                const hires = parseFloat(row.querySelector('.recruitment-hires').value.replace(/,/g, '')) || 0;
+                const annualCost = cost * postings;
+                const cpa = hires > 0 ? Math.round(annualCost / hires) : 0;
+                row.querySelector('.recruitment-annual-cost').textContent = `¥${annualCost.toLocaleString()}`;
+                row.querySelector('.recruitment-cpa').textContent = `¥${cpa.toLocaleString()}`;
+                totalAnnualRecruitmentCost += annualCost;
+            });
+            const budget = parseFloat(recruitmentBudgetEl.value.replace(/,/g, '')) || 0;
+            const actuals = parseFloat(recruitmentActualsEl.value.replace(/,/g, '')) || 0;
+            const totalProjectedCost = actuals + totalAnnualRecruitmentCost;
+            let attainmentRate = budget > 0 ? Math.round((totalProjectedCost / budget) * 100) : 0;
+            const remaining = budget - totalProjectedCost;
+            budgetAttainmentRateEl.textContent = `${attainmentRate}%`;
+            budgetProgressBarEl.style.width = `${Math.min(attainmentRate, 100)}%`;
+            remainingBudgetEl.textContent = `¥${remaining.toLocaleString()}`;
+            let totalOvertimeMonthly = 0;
+            overtimeCostBody.querySelectorAll('tr').forEach(row => {
+                const hourly = parseFloat(row.querySelector('.overtime-hourly').value.replace(/,/g, '')) || 0;
+                const hours = parseFloat(row.querySelector('.overtime-hours').value.replace(/,/g, '')) || 0;
+                const monthlyTotal = Math.round(hourly * hours * 1.25); // ★1.25倍はビジネスルールとして正しいか要確認
+                row.querySelector('.overtime-total').textContent = `¥${monthlyTotal.toLocaleString()}`;
+                totalOvertimeMonthly += monthlyTotal;
+            });
+            totalOvertimeCostAnnuallyEl.textContent = `¥${(totalOvertimeMonthly * 12).toLocaleString()}`;
+        }
+        // populateCost2Form 関数の修正
+        function populateCost2Form(data) { // 引数名を data に変更し、正規化オブジェクト全体を受け取る
+             // 予算/実績は storeDetails から取得
+            recruitmentBudgetEl.value = (data.storeDetails && data.storeDetails.recruitmentBudget) ? Number(data.storeDetails.recruitmentBudget).toLocaleString() : '';
+            recruitmentActualsEl.value = (data.storeDetails && data.storeDetails.recruitmentActuals) ? Number(data.storeDetails.recruitmentActuals).toLocaleString() : '';
+
+            // 採用媒体データは recruitmentMedia から取得
+            recruitmentCostBody.innerHTML = '';
+            if (data.recruitmentMedia && Array.isArray(data.recruitmentMedia)) {
+                data.recruitmentMedia.forEach(d => addRecruitmentRow(d));
+            }
+            if (recruitmentCostBody.children.length === 0) addRecruitmentRow();
+
+            // 時間外手当データは overtimeSubjects から取得
+            overtimeCostBody.innerHTML = '';
+            if (data.overtimeSubjects && Array.isArray(data.overtimeSubjects)) {
+                data.overtimeSubjects.forEach(d => addOvertimeRow(d));
+            }
+            if (overtimeCostBody.children.length === 0) addOvertimeRow();
+
+            calculateAllCost2();
+        }
+        // populateOrgForm 関数の修正
+        function populateOrgForm(organizationCharts) { // 引数名を organizationCharts に変更
+            orgDriveUrlInput.value = '';
+             // 修正: organizationCharts が配列であることを確認し、最初の要素の url を参照
+            if (Array.isArray(organizationCharts) && organizationCharts.length > 0 && organizationCharts[0].url) {
+                const url = organizationCharts[0].url;
+                currentOrgInfoEl.innerHTML = `<a href="${url}" target="_blank" class="text-blue-600 hover:underline font-semibold">現在登録されとる組織図ファイルを開く</a>`;
+                orgDriveUrlInput.placeholder = "新しいURLをここに入力して更新してな";
+            } else {
+                currentOrgInfoEl.innerHTML = `<p class="text-gray-500">まだ登録されてへんで。</p>`;
+                 orgDriveUrlInput.placeholder = "https://docs.google.com/...";
+            }
+        }
+        function onSaveSuccess(result) {
+            [saveCostBtn, confirmZeroBtn, saveCost2Btn, saveOrgBtn].forEach(btn => btn.disabled = false);
+            // 修正: result.success チェックは新しいAPIに合わせて調整が必要だが、ここでは一旦維持
+            if (result.success) {
+                showStatus(result.message, 'success');
+                // 修正: 組織図URLの更新は、result.updatedStoreに含まれる新しいorganizationCharts配列から行う
+                if (result.updatedStore && Array.isArray(result.updatedStore.organizationCharts) && result.updatedStore.organizationCharts.length > 0 && result.updatedStore.organizationCharts[0].url) {
+                     populateOrgForm(result.updatedStore.organizationCharts);
+                } else if (result.updatedStore && (!result.updatedStore.organizationCharts || result.updatedStore.organizationCharts.length === 0)) {
+                     // 組織図がクリアされた場合
+                     populateOrgForm([]);
+                }
+                // allStoresの更新とフィルターの再適用は維持
+                const storeIndex = allStores.findIndex(s => s.storeName === result.updatedStore.storeName);
+                if (storeIndex > -1) allStores[storeIndex] = result.updatedStore;
+                 // 修正: currentClient も最新の情報に更新
+                 if (currentClient && currentClient.storeName === result.updatedStore.storeName) {
+                     currentClient = result.updatedStore;
+                 }
+                filterAndPopulate();
+                 document.querySelectorAll('#client-list-table tr').forEach(tr => {
+                    tr.classList.toggle('bg-amber-50', tr.dataset.storeName === currentClient.storeName);
+                });
+            } else {
+                // 修正: onFailureに渡すエラーオブジェクトの構造を考慮
+                onFailure(result); // 新しいAPIのエラー構造に合わせる必要あり
+            }
+        }
+        // saveCostDataHandler 関数の修正
+        function saveCostDataHandler() {
+            if (!currentClient) return;
+            showStatus('外注費データ、保存中や…', 'info', true);
+            [saveCostBtn, confirmZeroBtn].forEach(btn => btn.disabled = true);
+
+            // 外注費データのみ収集
+            const outsourcingCosts = Array.from(costTableBody.querySelectorAll('tr')).map(row => {
+                const getVal = type => row.querySelector(`[data-type="${type}"]`).value.replace(/,/g, '');
+                return { month: parseInt(row.dataset.month), longPerson: getVal('longPerson'), longPrice: getVal('longPrice'), longTime: getVal('longTime'), spotPerson: getVal('spotPerson'), spotPrice: getVal('spotPrice'), spotTime: getVal('spotTime') };
+            });
+
+             // 共通ペイロード関数は後で実装することを想定し、ここでは直接GAS関数を呼び出す
+             // 修正: saveStoreData(dataObject) に統一
+            const dataObject = {
+                 storeName: currentClient.storeName, // storeName は必須
+                 outsourcingCosts: outsourcingCosts
+                 // 他のタブのデータは、それぞれのsaveHandlerで集めて buildSavePayload で結合する設計が望ましいが、
+                 // 今回の修正範囲では saveCostData では outsourcingCosts のみ渡す
+            };
+            google.script.run.withSuccessHandler(onSaveSuccess).withFailureHandler(onFailure).saveStoreData(dataObject);
+        }
+        function confirmZeroAndSaveHandler() {
+            showStatus('外注費を0円にして保存するで！', 'info');
+            costTableBody.querySelectorAll('.cost-input').forEach(input => input.value = '0');
+            calculateCosts();
+            saveCostDataHandler(); // 0にしたデータを保存
+        }
+        // saveCost2DataHandler 関数の修正
+        function saveCost2DataHandler() {
+             if (!currentClient) return;
+            showStatus('採用・労務費データ、保存中や…', 'info', true);
+            saveCost2Btn.disabled = true;
+
+            // 採用・労務費データを収集し、正規化構造にマッピング
+            const storeDetails = {
+                 recruitmentBudget: recruitmentBudgetEl.value.replace(/,/g, ''),
+                 recruitmentActuals: recruitmentActualsEl.value.replace(/,/g, '')
+                 // 他のstoreDetailsのフィールドも必要に応じて追加
+            };
+            const recruitmentMedia = Array.from(recruitmentCostBody.querySelectorAll('tr')).map(row => {
+                const mediumSelect = row.querySelector('.recruitment-medium');
+                return { medium: mediumSelect.value, mediumOther: mediumSelect.value === 'other' ? row.querySelector('.other-input').value : '', cost: row.querySelector('.recruitment-cost').value.replace(/,/g, ''), postings: row.querySelector('.recruitment-postings').value.replace(/,/g, ''), hires: row.querySelector('.recruitment-hires').value.replace(/,/g, '') };
+            });
+             const overtimeSubjects = Array.from(overtimeCostBody.querySelectorAll('tr')).map(row => {
+                const targetSelect = row.querySelector('.overtime-target');
+                return { target: targetSelect.value, targetOther: targetSelect.value === 'other' ? row.querySelector('.other-input').value : '', hourly: row.querySelector('.overtime-hourly').value.replace(/,/g, ''), hours: row.querySelector('.overtime-hours').value.replace(/,/g, '') };
+            });
+
+             // 共通ペイロード関数は後で実装することを想定し、ここでは直接GAS関数を呼び出す
+             // 修正: saveStoreData(dataObject) に統一
+            const dataObject = {
+                 storeName: currentClient.storeName, // storeName は必須
+                 storeDetails: storeDetails,
+                 recruitmentMedia: recruitmentMedia,
+                 overtimeSubjects: overtimeSubjects
+            };
+            google.script.run.withSuccessHandler(onSaveSuccess).withFailureHandler(onFailure).saveStoreData(dataObject);
+        }
+        // saveOrgDataHandler 関数の修正
+        function saveOrgDataHandler() {
+            if (!currentClient) return;
+            const orgDataUrl = orgDriveUrlInput.value.trim();
+            if (!orgDataUrl || !orgDataUrl.startsWith('https://docs.google.com/')) {
+                 return showStatus('有効なGoogle DriveのURLを入力してや！', 'error');
+            }
+            showStatus('組織図データ、登録中や…', 'info', true);
+            saveOrgBtn.disabled = true;
+
+             // 組織図データを収集し、正規化構造にマッピング
+             const organizationCharts = [{ url: orgDataUrl }]; // 配列としてラップ
+
+             // 共通ペイロード関数は後で実装することを想定し、ここでは直接GAS関数を呼び出す
+             // 修正: saveStoreData(dataObject) に統一
+             const dataObject = {
+                 storeName: currentClient.storeName, // storeName は必須
+                 organizationCharts: organizationCharts
+             };
+            google.script.run.withSuccessHandler(onSaveSuccess).withFailureHandler(onFailure).saveStoreData(dataObject);
+        }
+
+        // 共通ペイロード構築関数 (推奨だが、今回は個別のsaveHandler内で直接構築)
+        // function buildSavePayload() { ... }
+
+    initializeApp();
+});
+</script>
