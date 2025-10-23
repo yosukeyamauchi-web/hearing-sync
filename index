@@ -13,7 +13,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 
-    <?!= include('Stylesheet');?>
+    <?!= include('Stylesheet.html');?>
 </head>
 <body class="p-4 md:p-8">
 
@@ -233,6 +233,6 @@
         </div>
     </div>
 
-<?!= include('JavaScript');?>
+<?!= include('JavaScript.html');?>
 </body>
 </html>
