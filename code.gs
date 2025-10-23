@@ -4,22 +4,6 @@
 * 戦略：データ永続化をAppSheet API に一本化し、DriveApp / SpreadsheetApp を廃止する。
 */
 
-// --- ★★★グローバル設定★★★ ---
-// これらの設定はAppSheetApiService内でスクリプトプロパティから読み込むように変更されます。
-// const SPREADSHEET_ID = "1xQ8WhCQzVqXksWyEL8Z-wU16dMX3kClMInOQ0bCi-Js";
-// const DRIVE_FOLDER_ID = "1ZSrfUgTtUjaVTTFxsSEd6LjTqyiLc8fM";
-
-// シート名 (旧バージョン用。AppSheet移行後は不要)
-// const CLIENT_MASTER_SHEET_NAME = "物流ent4Gクライアントマスタ_row";
-// const NEUES_DATENLAGER_SHEET_NAME = "Neues Datenlager";
-
-// JSONファイル名 (旧バージョン用。AppSheet移行後は不要)
-// const CLIENT_MASTER_JSON_FILENAME = "client_master_data.json";
-// const COST_DATA_FILENAME = "cost_data.json";
-// const COST2_DATA_FILENAME = "cost2_data.json";
-// const ORG_DATA_FILENAME = "org_data.json";
-
-
 /**
 * AppSheet API との通信をカプセル化するサービスモジュール。
 * @namespace
@@ -154,10 +138,22 @@ muteHttpExceptions: true
 * @returns {HtmlOutput} レンダリングされる HTML オブジェクト
 */
 function doGet(e) {
-return HtmlService.createHtmlOutputFromFile('index.html')
-.setTitle('店舗データ管理アプリケーション') // アプリケーションのタイトルを適切に設定
-.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  // createTemplateFromFile を使用してテンプレートとして読み込み、evaluate() で評価する
+  const template = HtmlService.createTemplateFromFile('index.html');
+  return template.evaluate()
+    .setTitle('店舗データ管理アプリケーション') // アプリケーションのタイトルを適切に設定
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
+
+/**
+ * HTML テンプレートに他のHTMLファイルをインクルードするためのヘルパー関数。
+ * @param {string} filename - インクルードするHTMLファイル名（.html拡張子は不要）
+ * @returns {string} ファイルの内容
+ */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
 
 /**
 * AppSheet の'Stores'テーブルから全店舗のリストを取得し、フロントエンド用に整形して返す。
@@ -210,7 +206,7 @@ const storeId = storeDetails[0].StoreID; // Assuming StoreID is the primary key 
 
    // --- ステージ 2: 関連データの並列取得 ---
    const relatedTables = ['OutsourcingCosts', 'RecruitmentMedia', 'OvertimeSubjects', 'OrganizationCharts'];
-  
+
    // UrlFetchApp.fetchAll のために、各テーブルへのリクエストオブジェクトの配列を生成
    const requests = relatedTables.map(tableName => {
      // Assuming primary key for related tables is 'ID' and foreign key is 'StoreID'
@@ -222,15 +218,15 @@ const storeId = storeDetails[0].StoreID; // Assuming StoreID is the primary key 
        "Selector": filter
      });
    });
-  
+
    // 全てのリクエストを並列実行
    const responses = UrlFetchApp.fetchAll(requests);
-  
+
    // --- データ集約 ---
    const aggregatedData = {
      storeDetails: storeDetails[0], // Assuming storeDetails is an array with one element
    };
-  
+
    responses.forEach((response, index) => {
      const tableName = relatedTables[index];
      if (response.getResponseCode() !== 200) {
@@ -239,7 +235,7 @@ const storeId = storeDetails[0].StoreID; // Assuming StoreID is the primary key 
      // AppSheet API の Find アクションは常に配列を返すため、そのまま格納する
      aggregatedData[tableName.charAt(0).toLowerCase() + tableName.slice(1)] = JSON.parse(response.getContentText());
    });
-  
+
    return aggregatedData;
 
 } catch (error) {
@@ -273,12 +269,12 @@ const storeId = stores[0].StoreID; // Assuming StoreID is the primary key in Sto
      'OvertimeSubjects': overtimeSubjects,
      'OrganizationCharts': organizationCharts
    };
-  
+
    // --- DELETE フェーズ ---
    for (const tableName in childDataMap) {
      const filter = `Filter(${tableName}, ([StoreID] = "${storeId}"))`; // Filter by foreign key StoreID
      const existingRecords = AppSheetApiService.findRecords(tableName, filter);
-    
+
      if (existingRecords && existingRecords.length > 0) {
        // AppSheet の Delete アクションは主キーの配列を要求する
        const primaryKeyColumn = 'ID'; // 各テーブルの主キーカラム名に合わせて変更
@@ -286,7 +282,7 @@ const storeId = stores[0].StoreID; // Assuming StoreID is the primary key in Sto
        AppSheetApiService.deleteRecords(tableName, keysToDelete);
      }
    }
-  
+
    // --- INSERT フェーズ ---
    // 1. 親テーブル(Stores)を更新
    // editRecords は主キーを含むレコードの配列を期待する
@@ -305,7 +301,7 @@ const storeId = stores[0].StoreID; // Assuming StoreID is the primary key in Sto
        AppSheetApiService.addRecords(tableName, rowsWithFk);
      }
    }
-  
+
    return { success: true, message: 'データの保存が完了しました。' };
 
 } catch (error) {
@@ -314,32 +310,3 @@ Logger.log(`saveStoreDataでエラーが発生しました: ${error.toString()}`
 return { success: false, error: `データの保存に失敗しました。管理者にお問い合わせください。詳細: ${error.message}` };
 }
 }
-
-
-/**
-* スプレッドシートを開いた時にメニューを追加する (必要に応じて項目を修正)
-*/
-function onOpen() {
- // AppSheet への移行に伴い、メニュー項目は不要になる可能性があります。
- // 必要に応じて、新しい機能へのメニュー項目を追加してください。
- // SpreadsheetApp.getUi().createMenu('便利ツール').addToUi();
-}
-
-// 以下の関数は AppSheet 移行に伴い削除されました。
-// - getInitialData()
-// - getStoreDetails()
-// - saveCostData()
-// - saveCost2Data()
-// - saveOrgData()
-// - saveJsonData()
-// - updateSummarySheet()
-// - getJsonDataFromFile()
-// - storeOrgFileToDrive()
-// - findRowIndex()
-// - getUpdatedStoreStatus()
-// - getOrCreateFolder()
-// - setDomainEditorSharing()
-// - extractIdFromUrl()
-// - convertMasterToJsonFile()
-
-
